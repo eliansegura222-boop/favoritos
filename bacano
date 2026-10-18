@@ -1,0 +1,15 @@
+{
+  "name": "Favorite Emojis & Stickers",
+  "description": "Favoritos de emojis y stickers: comandos locales Built-in y franja experimental en el selector de Discord.",
+  "authors": [
+    {
+      "name": "Community",
+      "id": "0"
+    }
+  ],
+  "main": "index.js",
+  "vendetta": {
+    "icon": "ic_emoji_24px"
+  },
+  "hash": "84a26b7b5db4c619dd4b31128ca864f4c717e80230e4aeb4916b59fb6a8265eb"
+}
