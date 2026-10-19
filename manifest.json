@@ -1,15 +1,15 @@
 {
-  "format": 1,
-  "id": "com.local.nitro-gift-watcher",
   "name": "Nitro Gift Watcher",
-  "description": "Detecta regalos de Discord, muestra notificaciones y guarda historial de verificaciones y canjes.",
-  "author": "Local",
-  "version": "1.1.0",
-  "dependencies": {
-    "revenge.api": { "version": ">=1" },
-    "discord": { "version": "*" }
-  },
-  "dist": {
-    "script": "index.js"
+  "description": "Detecta regalos de Nitro en mensajes, notifica resultados y guarda un historial; autocanje opcional.",
+  "authors": [
+    {
+      "name": "Local"
+    }
+  ],
+  "main": "index.js",
+  "hash": "c3f64d4d20723ac31ad2255261c7dda3b1b488f80a4c0fa632fcdc5f9735cc41",
+  "version": "1.2.0",
+  "vendetta": {
+    "icon": "ic_gift_24px"
   }
 }
