@@ -1,321 +1,292 @@
 (function () {
   "use strict";
-  // Favorite Emojis & Stickers v1.0 - Revenge clasico.
-  // Comandos BUILT_IN locales + intento de integracion no invasiva en el selector nativo.
-  var v = vendetta;
-  var React = v.metro.common.React;
-  var RN = v.metro.common.ReactNative;
-  var storage = v.plugin.storage;
-  var findByProps = v.metro.findByProps;
-  var cleanups = [];
-  var commands = [];
-  var running = false;
-  var favorites = { emojis: [], stickers: [] };
-  var refreshSettings = null;
-  var pickerRenders = 0;
-  var pickerStatus = "Pendiente";
-  var commandsStatus = "Pendiente";
-  var originalCreateElement = null;
-  var wrappedTypes = [];
-  var wraps = 0;
+  // Custom Notifications v1.0, Revenge Classic / Vendetta.
+  // Avisos LOCALES mientras la aplicacion JS este activa. No modifica push de Android.
+  var api = vendetta;
+  var React = api.metro.common.React;
+  var RN = api.metro.common.ReactNative;
+  var storage = api.plugin.storage;
+  var findByProps = api.metro.findByProps;
+  var E = React.createElement;
+  var active = false;
+  var dispatcher = null;
+  var onMessage = null;
+  var commandUndo = [];
+  var refresh = null;
+  var lastSeen = Object.create(null);
+  var lastRuleAt = Object.create(null);
+  var config = { enabled: true, vibrate: true, notifications: true, mentionOnly: false, rules: [] };
+  var diagnostics = "Esperando mensajes...";
+  var audioStatus = "No probado";
+  var commandStatus = "Pendiente";
+  var ruleSeq = 0;
 
-  function log(message, err) { try { console.log("[FavoriteExpressions] " + message, err || ""); } catch (_) {} }
-  function toast(text) { try { v.ui.toasts.showToast(String(text).slice(0, 180)); } catch (_) { log(text); } }
-  function refresh() { try { if (refreshSettings) refreshSettings(); } catch (_) {} }
-  function lookup() { try { return findByProps.apply(null, arguments); } catch (_) { return null; } }
-  function safeStr(value, len) { return typeof value === "string" ? value.trim().slice(0, len || 120) : ""; }
-  function namesEqual(a,b) { return String(a || "") === String(b || ""); }
-  function normalizeEmoji(text) {
-    var s = safeStr(text, 160);
-    if (!s) return null;
-    var m = s.match(/^<(a?):([A-Za-z0-9_]{2,32}):(\d{15,22})>$/);
-    if (m) return { key: m[3], name: m[2], text: s, type: "custom", animated: !!m[1], id: m[3] };
-    if (s.indexOf("<") !== -1 || s.indexOf(">") !== -1 || s.length > 36) return null;
-    if (!/[^a-zA-Z0-9 _-]/u.test(s)) return null;
-    return { key: "u:" + s, name: s, text: s, type: "unicode", animated: false, id: "" };
+  function log(message, error) { try { console.log("[CustomNotifications] " + message, error || ""); } catch (_) {} }
+  function toast(message) {
+    try { if (api.ui && api.ui.toasts) api.ui.toasts.showToast(String(message).slice(0, 150)); } catch (_) {}
   }
-  function resolveSticker(idOrName) {
-    var s = safeStr(idOrName, 120);
-    var id = (s.match(/\d{15,22}/) || [])[0];
-    if (!id) return null;
-    var name = "Sticker " + id.slice(-5);
+  function update() { try { if (refresh) refresh(); } catch (_) {} }
+  function str(v, max) { return String(v == null ? "" : v).replace(/[\x00-\x1f]/g, "").slice(0, max || 300); }
+  function id(v) { return str(v, 32).trim(); }
+  function validId(v) { return /^\d{15,22}$/.test(id(v)); }
+  function find() { try { return findByProps.apply(null, arguments); } catch (_) { return null; } }
+  function save() { try { storage.customNotificationV1 = JSON.stringify(config); } catch (e) { log("Guardar", e); } }
+  function scrubRule(r) {
+    if (!r || typeof r !== "object" || ["server", "user"].indexOf(r.type) < 0 || !validId(r.target)) return null;
+    return { key: str(r.key || "r" + (++ruleSeq), 50), type: r.type, target: id(r.target),
+      label: str(r.label || r.target, 56), url: str(r.url || "", 500),
+      tone: ["message1", "message2", "message3", "none"].indexOf(r.tone) !== -1 ? r.tone : "message1",
+      enabled: r.enabled !== false, cooldown: Math.min(120, Math.max(1, Number(r.cooldown) || 8)) };
+  }
+  function load() {
     try {
-      var mod = v.metro.findByStoreName && v.metro.findByStoreName("StickersStore");
-      if (!mod) mod = lookup("getStickerById");
-      var st = mod && mod.getStickerById && mod.getStickerById(id);
-      if (st && st.name) name = safeStr(st.name, 60);
-    } catch (_) {}
-    return { key: id, id: id, name: name, type: "sticker" };
+      var o = JSON.parse(storage.customNotificationV1 || "null");
+      if (o && typeof o === "object") {
+        config.enabled = o.enabled !== false;
+        config.vibrate = o.vibrate !== false;
+        config.notifications = o.notifications !== false;
+        config.mentionOnly = !!o.mentionOnly;
+        config.rules = Array.isArray(o.rules) ? o.rules.slice(0, 100).map(scrubRule).filter(Boolean) : [];
+      }
+    } catch (e) { log("Configuracion anterior invalida", e); }
   }
-  function loadSaved(raw) {
-    var x = raw && typeof raw === "object" ? raw : {};
-    var e = Array.isArray(x.emojis) ? x.emojis : [];
-    var s = Array.isArray(x.stickers) ? x.stickers : [];
-    return {
-      emojis: e.slice(0, 100).filter(function (z) { return z && typeof z.key === "string" && typeof z.text === "string"; }),
-      stickers: s.slice(0, 100).filter(function (z) { return z && /^\d{15,22}$/.test(String(z.id)); })
-    };
+  function isDirectAudio(u) {
+    return /^https:\/\//i.test(u) && /\.(mp3|m4a|ogg|wav|aac)(?:[?#]|$)/i.test(u);
   }
-  function save() {
-    try { storage.favorites = JSON.parse(JSON.stringify(favorites)); }
-    catch (e) { log("No se pudieron guardar favoritos", e); }
-    refresh();
-  }
-  function toggle(kind, item) {
-    if (!item) { toast("Formato no valido."); return; }
-    var list = favorites[kind];
-    var n = list.findIndex(function (z) { return z.key === item.key; });
-    if (n !== -1) { list.splice(n, 1); save(); toast("Quitado de favoritos: " + item.name); }
-    else {
-      if (list.length >= 100) list.pop();
-      list.unshift(item); save(); toast("Guardado: " + item.name);
-    }
-    if (typeof setTimeout === "function") setTimeout(function () { if (running) installCommands(); }, 60);
-    else installCommands(); // Actualizar opciones de los comandos Built-in.
-  }
-  function currentChannel() {
+  function isMediaPage(u) { return /^(https:\/\/)(?:[^/]+\.)?(youtube\.com|youtu\.be|spotify\.com|tiktok\.com)(?:[/:?#]|$)/i.test(u); }
+  function playTone(tone) {
+    if (tone === "none") { audioStatus = "Sin sonido (regla configurada en silencio)."; return false; }
+    // Los sonidos internos requieren el reproductor de esta compilacion de Discord.
     try {
-      var store = v.metro.findByStoreName && v.metro.findByStoreName("SelectedChannelStore");
-      if (!store) store = lookup("getChannelId");
-      var id = store && store.getChannelId && store.getChannelId();
-      return id ? String(id) : "";
-    } catch (_) { return ""; }
-  }
-  function insertEmoji(item) {
-    if (!item) { toast("Selecciona un emoji favorito."); return false; }
-    var value = item.text;
-    try {
-      var cd = lookup("ComponentDispatch") || lookup("dispatchToLastSubscribed", "subscribe") || lookup("dispatchToLastSubscribed") || (v.metro.common && v.metro.common.ComponentDispatch);
-      var bus = cd && (cd.ComponentDispatch || cd.default && cd.default.ComponentDispatch || cd);
-      if (bus && typeof bus.dispatchToLastSubscribed === "function" && (!bus.hasSubscribers || bus.hasSubscribers("INSERT_TEXT"))) {
-        bus.dispatchToLastSubscribed("INSERT_TEXT", { rawText: value, plainText: value });
+      var player = find("playSound");
+      if (player && typeof player.playSound === "function") {
+        var result = player.playSound(tone);
+        if (result && typeof result.catch === "function") result.catch(function (e) { log("Fallo sonido integrado", e); });
+        audioStatus = "Se solicito sonido integrado: " + tone;
         return true;
       }
-      if (bus && typeof bus.dispatch === "function" && (!bus.hasSubscribers || bus.hasSubscribers("INSERT_TEXT"))) {
-        bus.dispatch("INSERT_TEXT", { rawText: value, plainText: value });
-        return true;
-      }
-    } catch (e) { log("No se pudo insertar emoji", e); }
-    try {
-      var clip = RN.Clipboard || lookup("setString");
-      if (clip && typeof clip.setString === "function") {
-        clip.setString(value); toast("Emoji copiado. Pegalo en el chat."); return true;
-      }
-    } catch (_) {}
-    toast("No se encontro el campo de escritura. Usa /emojis.");
+    } catch (e) { log("Fallo sonido integrado", e); }
+    audioStatus = "Discord no expone un reproductor de tonos compatible.";
     return false;
   }
-  function sendSticker(item) {
-    if (!item) { toast("Selecciona un sticker favorito."); return false; }
-    var channelId = currentChannel();
-    if (!channelId) { toast("Abre primero un chat."); return false; }
-    try {
-      var send = lookup("sendStickers", "sendMessage") || lookup("sendStickers");
-      if (send && typeof send.sendStickers === "function") {
-        var result = send.sendStickers(channelId, [item.id], false);
-        if (result && typeof result.catch === "function") result.catch(function () { toast("Discord no permite enviar este sticker aqui."); });
-        return true;
-      }
-    } catch (e) { log("Fallo envio de sticker", e); }
-    toast("Tu Discord no expone el envio nativo de stickers.");
-    return false;
-  }
-  function argValue(args, i) {
-    var z = args && args[i];
-    if (z === undefined || z === null) return "";
-    if (typeof z === "string" || typeof z === "number") return String(z);
-    if (typeof z.value === "string" || typeof z.value === "number") return String(z.value);
-    if (typeof z.option === "string") return z.option;
-    return "";
-  }
-  function opt(name, desc, required, choices) {
-    var o = { name: name, displayName: name, description: desc, displayDescription: desc,
-      type: 3, required: !!required };
-    if (choices && choices.length) o.choices = choices.map(function (z) {
-      return { name: safeStr(z.name, 90), displayName: safeStr(z.name, 90), value: z.key };
-    });
-    return o;
-  }
-  function command(name, desc, opts, callback) {
-    var remove = v.commands.registerCommand({
-      name: name, displayName: name, description: desc, displayDescription: desc,
-      applicationId: "-1", type: 1, inputType: 0, options: opts,
-      execute: function (args) {
-        try { callback(args || []); }
-        catch (e) { log("Error comando /" + name, e); toast("No se pudo ejecutar /" + name); }
-        return; // Solo local: nunca devuelve un mensaje para enviarlo al canal.
-      }
-    });
-    if (typeof remove === "function") commands.push(remove);
-  }
-  function installCommands() {
-    while (commands.length) { try { commands.pop()(); } catch (_) {} }
-    try {
-      if (!v.commands || typeof v.commands.registerCommand !== "function") throw Error("API de comandos ausente");
-      command("favemoji", "Guardar o quitar un emoji favorito (local)", [opt("emoji", "Pega un emoji o <:nombre:id>", true)], function(args){ toggle("emojis", normalizeEmoji(argValue(args, 0))); });
-      command("favsticker", "Guardar o quitar sticker por ID (local)", [opt("id", "ID numerico del sticker", true)], function(args){ toggle("stickers", resolveSticker(argValue(args, 0))); });
-      command("emojis", "Insertar un emoji favorito en el chat (local)",
-        [opt("favorito", "Nombre o emoji guardado", false, favorites.emojis.slice(0, 25))], function(args){
-          var s = argValue(args, 0);
-          var it = favorites.emojis.find(function (z) { return z.key === s || z.text === s || z.name.toLowerCase() === s.toLowerCase(); });
-          if (!it && !s && favorites.emojis.length === 1) it = favorites.emojis[0];
-          if (!it) { toast(favorites.emojis.length ? "Elige un emoji en las opciones de /emojis." : "No tienes emojis. Usa /favemoji."); return; }
-          insertEmoji(it);
-        });
-      command("stickers", "Enviar un sticker favorito (local, el sticker si se envia)",
-        [opt("favorito", "Selecciona tu sticker favorito", false, favorites.stickers.slice(0, 25))], function(args){
-          var s = argValue(args, 0);
-          var it = favorites.stickers.find(function (z) { return z.key === s || z.id === s || z.name.toLowerCase() === s.toLowerCase(); });
-          if (!it && !s && favorites.stickers.length === 1) it = favorites.stickers[0];
-          if (!it) { toast(favorites.stickers.length ? "Elige un sticker en las opciones de /stickers." : "No tienes stickers. Usa /favsticker."); return; }
-          sendSticker(it);
-        });
-      commandsStatus = "4 comandos BUILT-IN registrados";
-    } catch (e) { commandsStatus = "Error al registrar comandos"; log(commandsStatus, e); }
-    refresh();
-  }
-  function Txt(value, style) {
-    return React.createElement(RN.Text, { style: Object.assign({ color: "#eef0f6", fontSize: 13 }, style || {}) }, value);
-  }
-  function button(text, action, style) {
-    return React.createElement(RN.TouchableOpacity, { key: text, onPress: action,
-      style: Object.assign({ backgroundColor: "#333b58", borderRadius: 9, padding: 10, margin: 4 }, style || {}) },
-      Txt(text, { color: "#ffffff", fontWeight: "700" }));
-  }
-  function FavoriteTray(props) {
-    var kind = props.kind;
-    var items = kind === "sticker" ? favorites.stickers : favorites.emojis;
-    var [, force] = React.useState(0);
-    React.useEffect(function () { return function () {}; }, []);
-    if (!items.length) return React.createElement(RN.View, { style: { padding: 6, backgroundColor: "#242731" } },
-      Txt("⭐ Sin favoritos. Usa /favemoji o /favsticker", { color: "#aab1c6", fontSize: 12 }));
-    return React.createElement(RN.View, { style: { paddingVertical: 7, backgroundColor: "#242731", borderBottomWidth: 1, borderBottomColor: "#44485c" } },
-      Txt("⭐ FAVORITOS · Mantener pulsado para quitar", { color: "#f3df89", fontWeight: "700", paddingLeft: 10, marginBottom: 5 }),
-      React.createElement(RN.ScrollView, { horizontal: true, showsHorizontalScrollIndicator: false },
-        items.slice(0, 25).map(function (item) {
-          var src = kind === "sticker" ? "https://cdn.discordapp.com/stickers/" + item.id + ".png" :
-            item.id ? "https://cdn.discordapp.com/emojis/" + item.id + (item.animated ? ".gif" : ".png") : "";
-          return React.createElement(RN.TouchableOpacity, {
-            key: item.key, onPress: function () { kind === "sticker" ? sendSticker(item) : insertEmoji(item); },
-            onLongPress: function () { toggle(kind === "sticker" ? "stickers" : "emojis", item); force(function(x) { return x + 1; }); },
-            style: { minWidth: 46, minHeight: 46, alignItems: "center", justifyContent: "center", borderRadius: 10, marginHorizontal: 3, backgroundColor: "#373b50" }
-          }, src && RN.Image ? React.createElement(RN.Image, { source: { uri: src }, style: { width: 35, height: 35 } }) :
-            Txt(item.text || "⭐", { fontSize: 28 }));
-        })));
-  }
-  function favoriteShell(props) {
-    pickerRenders++;
-    // RN.View solo envuelve el selector reconocido; no cambia la barra de mensajes.
-    return React.createElement(RN.View, { style: { flex: 1 } },
-      React.createElement(FavoriteTray, { kind: props.kind }), props.child);
-  }
-  function targetKind(type) {
-    if (!type) return "";
-    var name = type.displayName || type.name || (type.type && (type.type.displayName || type.type.name)) ||
-      (type.render && (type.render.displayName || type.render.name)) || "";
-    if (/^(?:EmojiPicker|EmojiPickerSheet|EmojiPickerContainer|EmojiPickerBody|EmojiPickerContent)$/.test(name)) return "emoji";
-    if (/^(?:StickerPicker|StickerPickerSheet|StickerPickerContainer|StickerPickerBody|StickerPickerContent)$/.test(name)) return "sticker";
-    if (/^(?:ExpressionPicker|ExpressionPickerSheet|ExpressionPickerContainer)$/.test(name)) return "emoji";
-    return "";
-  }
-  function wrapTarget(wrapper, type, kind) {
-    if (!wrapper || typeof wrapper[type] !== "function") return false;
-    var original = wrapper[type];
-    if (wrappedTypes.indexOf(original) !== -1) return false;
-    var wrapped = function (props) {
-      var child = React.createElement(original, props);
-      return React.createElement(favoriteShell, { kind: kind, child: child });
-    };
-    wrapped.displayName = "FavoritesWrappedPicker";
-    wrapper[type] = wrapped;
-    wrappedTypes.push(original);
-    cleanups.push(function () { if (wrapper[type] === wrapped) wrapper[type] = original; });
-    wraps++;
-    return true;
-  }
-  function scanPickerModules() {
-    var modules = v.metro.modules;
-    if (!modules) return 0;
-    var count = 0;
-    Object.keys(modules).forEach(function (id) {
+  function playRemoteAudio(url) {
+    if (!isDirectAudio(url)) return false;
+    // Solo probar APIs de reproduccion explicitas, nunca abrir paginas web por sorpresa.
+    // No hay API de audio remoto garantizada en Revenge clasico.
+    var candidates = ["playAudio", "playAudioUrl", "playAudioURL", "playUrl"];
+    for (var i = 0; i < candidates.length; i++) {
       try {
-        var m = modules[id];
-        var exp = m && ((m.publicModule && m.publicModule.exports) || m.exports);
-        if (!exp) return;
-        var exports = [exp];
-        if (exp.default) exports.push(exp.default);
-        exports.forEach(function (item) {
-          var kind = targetKind(item);
-          if (!kind) return;
-          if (item && typeof item.type === "function" && wrapTarget(item, "type", kind)) count++;
-          // No sustituir .render de forwardRef: puede recibir ref como segundo argumento.
-        });
-      } catch (_) {}
-    });
-    return count;
-  }
-  function patchPicker() {
-    // Interceptamos createElement como apoyo a los exportes React.memo ya importados.
-    // El filtro por nombre es estricto, para no modificar el resto de la interfaz.
-    var original = React.createElement;
-    if (typeof original !== "function") { pickerStatus = "No se encontro React.createElement"; return; }
-    originalCreateElement = original;
-    React.createElement = function () {
-      var type = arguments[0];
-      var kind = targetKind(type);
-      var normal = original.apply(this, arguments);
-      if (!running || !kind || wrappedTypes.indexOf(type) !== -1) return normal;
-      pickerRenders++;
-      return original.call(React, favoriteShell, { kind: kind, child: normal });
-    };
-    cleanups.push(function () { if (React.createElement !== original) React.createElement = original; });
-    var patched = scanPickerModules();
-    pickerStatus = "Parches: " + patched + " | Render del selector: 0 (pendiente de abrirlo)";
-    refresh();
-  }
-  function SettingsScreen() {
-    var [, force] = React.useState(0);
-    React.useEffect(function () {
-      refreshSettings = function () { force(function(x) {return x + 1;}); };
-      return function () { refreshSettings = null; };
-    }, []);
-    function list(kind, title) {
-      var arr = favorites[kind];
-      return React.createElement(RN.View, { style: { marginTop: 14 } },
-        Txt(title + " (" + arr.length + ")", { fontSize: 17, fontWeight: "700", marginBottom: 6 }),
-        arr.length ? arr.map(function(it) {
-          return React.createElement(RN.View, { key: it.key, style: { flexDirection: "row", alignItems: "center", marginBottom: 3, backgroundColor: "#292d3c", borderRadius: 10 } },
-            React.createElement(RN.View, { style: { flex: 1, padding: 10 } }, Txt(it.name)),
-            button("QUITAR", function() { toggle(kind, it); }, { backgroundColor: "#783748" }));
-        }) : Txt("No hay favoritos guardados", { color: "#abb0c4" }));
+        var key = candidates[i];
+        var module = find(key);
+        if (!module || typeof module[key] !== "function") continue;
+        var result = module[key](url);
+        if (result && typeof result.then === "function") {
+          result.then(function () { audioStatus = "Reproduccion remota solicitada"; update(); }, function (e) {
+            audioStatus = "El modulo de audio rechazo el enlace"; log("Audio URL", e); update();
+          });
+        }
+        audioStatus = "Reproduccion remota solicitada por " + key;
+        return true;
+      } catch (e) { log("Metodo de audio incompatible", e); }
     }
-    return React.createElement(RN.ScrollView, { style: { flex: 1, backgroundColor: "#171920" }, contentContainerStyle: { padding: 16, paddingBottom: 40 } },
-      Txt("FAVORITE EMOJIS & STICKERS", { fontSize: 20, fontWeight: "800" }),
-      Txt("v1.0 · Revenge clásico", { color: "#aab1c6", marginBottom: 12 }),
-      Txt(commandsStatus, { color: "#98f5ae" }),
-      Txt(pickerStatus.replace("Render del selector: 0", "Render del selector: " + pickerRenders), { color: "#f3df89", marginTop: 5 }),
-      Txt("Comandos: /favemoji, /favsticker, /emojis y /stickers. Los cuatro son BUILT-IN. Para agregar stickers necesitas su ID.", { marginTop: 10, lineHeight: 20 }),
-      Txt("Si el contador de render sigue en 0 despues de abrir el selector, tu version de Discord no expone un componente compatible. Los comandos siguen disponibles.", { marginTop: 7, color: "#b4b9c9", lineHeight: 19 }),
-      button("VOLVER A BUSCAR SELECTOR", function() { scanPickerModules(); refresh(); }),
-      list("emojis", "EMOJIS FAVORITOS"),
-      list("stickers", "STICKERS FAVORITOS"));
+    audioStatus = "No se encontro reproductor compatible con MP3/OGG externo.";
+    return false;
+  }
+  function soundRule(rule) {
+    var sound = rule.url;
+    if (sound && isDirectAudio(sound) && playRemoteAudio(sound)) return true;
+    var isPage = !!sound && isMediaPage(sound);
+    var notAudio = !!sound && !isDirectAudio(sound);
+    var used = playTone(rule.tone);
+    if (isPage) audioStatus = "Enlace de plataforma: se uso el tono local, no la musica del enlace.";
+    else if (notAudio) audioStatus = "El enlace no es un MP3/OGG directo: se uso tono local.";
+    else if (sound && !used) audioStatus = "El audio externo y el tono local no estan disponibles; revisa los ajustes.";
+    return used;
+  }
+  function openSource(url) {
+    if (!/^https:\/\//i.test(url)) return toast("Enlace no disponible");
+    try {
+      var mod = api.metro.common.url;
+      if (mod && typeof mod.openURL === "function") { mod.openURL(url); return; }
+      if (RN.Linking && typeof RN.Linking.openURL === "function") { RN.Linking.openURL(url); return; }
+    } catch (e) { log("No se pudo abrir el enlace", e); }
+    toast("No se pudo abrir el enlace en esta version de Discord");
+  }
+  function alertLocal(rule, author, preview, dryRun) {
+    if (config.vibrate && RN.Vibration && typeof RN.Vibration.vibrate === "function") {
+      try { RN.Vibration.vibrate(90); } catch (_) {}
+    }
+    if (config.notifications) {
+      toast((dryRun ? "PRUEBA · " : "Aviso · ") + rule.label + " · " + author + (preview ? ": " + str(preview, 38) : ""));
+    }
+    soundRule(rule);
+    diagnostics = (dryRun ? "Prueba" : "Ultima coincidencia") + ": " + rule.label + " (" + new Date().toLocaleTimeString() + ")";
+    update();
+  }
+  function getMyId() {
+    try { var mod = find("getCurrentUser"); var user = mod && mod.getCurrentUser(); return id(user && user.id); } catch (_) { return ""; }
+  }
+  function getChannelGuild(channelId) {
+    try { var mod = find("getChannel"); var channel = mod && mod.getChannel(channelId); return id(channel && (channel.guild_id || channel.guildId)); } catch (_) { return ""; }
+  }
+  function directlyMentioned(msg, myId) {
+    if (!myId) return false;
+    if (Array.isArray(msg.mentions) && msg.mentions.some(function (m) { return id(m && m.id) === myId; })) return true;
+    var content = str(msg.content, 4000);
+    return content.indexOf("<@" + myId + ">") >= 0 || content.indexOf("<@!" + myId + ">") >= 0;
+  }
+  function onMessageCreate(event) {
+    if (!active || !config.enabled) return;
+    try {
+      var msg = event && (event.message || event);
+      if (!msg || typeof msg !== "object") return;
+      var author = msg.author || event.author || {};
+      var authorId = id(author.id || msg.author_id || msg.authorId);
+      var msgId = id(msg.id || event.messageId);
+      var channelId = id(msg.channel_id || msg.channelId || event.channelId);
+      if (!msgId || !channelId || !authorId || authorId === getMyId()) return;
+      if (lastSeen[msgId]) return;
+      lastSeen[msgId] = Date.now();
+      if (Object.keys(lastSeen).length > 350) lastSeen = Object.create(null);
+      if (config.mentionOnly && !directlyMentioned(msg, getMyId())) return;
+      var guildId = id(msg.guild_id || msg.guildId || event.guildId || getChannelGuild(channelId));
+      var match = null;
+      // Regla de usuario tiene prioridad sobre regla de servidor.
+      config.rules.some(function (r) { if (r.enabled && r.type === "user" && r.target === authorId) { match = r; return true; } return false; });
+      if (!match) config.rules.some(function (r) { if (r.enabled && r.type === "server" && guildId && r.target === guildId) { match = r; return true; } return false; });
+      if (!match) return;
+      var time = Date.now();
+      if (lastRuleAt[match.key] && time - lastRuleAt[match.key] < match.cooldown * 1000) return;
+      lastRuleAt[match.key] = time;
+      alertLocal(match, str(author.global_name || author.username || "Usuario", 32), str(msg.content || "Nuevo mensaje", 100), false);
+    } catch (e) { log("No se pudo procesar el mensaje", e); diagnostics = "Error al revisar notificacion"; update(); }
+  }
+  function addRule(type, target, label, url, tone) {
+    target = id(target);
+    if (!validId(target)) { toast("ID invalido: pega el ID numerico del usuario o servidor."); return false; }
+    if (url && !/^https:\/\//i.test(url)) { toast("Usa una URL https:// valida o deja el enlace vacio."); return false; }
+    var existing = config.rules.find(function (r) { return r.type === type && r.target === target; });
+    if (existing) {
+      existing.label = str(label || target, 56); existing.url = str(url, 500); existing.tone = tone; existing.enabled = true;
+    } else {
+      config.rules.unshift({ key: "n" + Date.now() + "-" + (++ruleSeq), type: type, target: target, label: str(label || target, 56), url: str(url, 500), tone: tone, enabled: true, cooldown: 8 });
+    }
+    config.rules = config.rules.slice(0, 100);
+    save(); update(); toast("Regla guardada para " + type + " " + target); return true;
+  }
+  function registerCommand(name, desc, execute) {
+    if (!api.commands || typeof api.commands.registerCommand !== "function") return null;
+    return api.commands.registerCommand({ name: name, displayName: name, description: desc,
+      displayDescription: desc, applicationId: "-1", type: 1, inputType: 0, options: [],
+      execute: function () { try { execute(); } catch (e) { log("Comando " + name, e); toast("Error ejecutando " + name); } return; } });
+  }
+  function registerCommands() {
+    var registered = [];
+    try {
+      var specs = [
+        ["notion", "Activar notificaciones privadas", function () { config.enabled = true; save(); update(); toast("Avisos personalizados activados"); }],
+        ["notioff", "Desactivar notificaciones privadas", function () { config.enabled = false; save(); update(); toast("Avisos personalizados desactivados"); }],
+        ["notitest", "Probar la primera regla personalizada", function () {
+          var rule = config.rules.find(function (r) { return r.enabled; });
+          if (!rule) return toast("Primero crea una regla en los ajustes del plugin");
+          alertLocal(rule, "Prueba", "Sonido de ejemplo", true);
+        }],
+        ["notistatus", "Mostrar el estado de las alertas privadas", function () {
+          toast("Alertas " + (config.enabled ? "ON" : "OFF") + " · " + config.rules.length + " reglas · " + audioStatus);
+        }]
+      ];
+      specs.forEach(function (entry) { var off = registerCommand(entry[0], entry[1], entry[2]); if (typeof off === "function") registered.push(off); });
+      commandUndo = registered;
+      commandStatus = registered.length === specs.length ? "4 comandos Built-in activos" : "Comandos parciales: " + registered.length + "/4";
+    } catch (e) { log("No se pudieron registrar comandos", e); commandStatus = "Error registrando comandos"; }
+  }
+
+  function SettingsScreen() {
+    var local = React.useState(0), rerender = local[1];
+    var typeState = React.useState("server"), type = typeState[0], setType = typeState[1];
+    var targetState = React.useState(""), target = targetState[0], setTarget = targetState[1];
+    var labelState = React.useState(""), name = labelState[0], setName = labelState[1];
+    var urlState = React.useState(""), url = urlState[0], setUrl = urlState[1];
+    var toneState = React.useState("message1"), tone = toneState[0], setTone = toneState[1];
+    React.useEffect(function () { refresh = function () { rerender(function (v) { return v + 1; }); }; return function () { refresh = null; }; }, []);
+    function txt(value, style) { return E(RN.Text, { style: Object.assign({ color: "#e8e9f0", fontSize: 14, lineHeight: 21 }, style || {}) }, value); }
+    function input(value, setter, hint, opts) { return E(RN.TextInput, Object.assign({ value: value, onChangeText: setter, placeholder: hint,
+      placeholderTextColor: "#9b9da9", autoCorrect: false,
+      style: { backgroundColor: "#292b35", borderRadius: 10, color: "white", padding: 12, marginTop: 8, fontSize: 14 } }, opts || {})); }
+    function btn(title, callback, color) { return E(RN.TouchableOpacity, { key: title, onPress: callback,
+      style: { paddingVertical: 11, paddingHorizontal: 12, borderRadius: 10, backgroundColor: color || "#5865f2", marginTop: 8 } },
+      txt(title, { fontWeight: "700", textAlign: "center", color: "white" })); }
+    function toggle(text, key) { return E(RN.View, { key: key, style: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 7 } },
+      E(RN.View, { style: { flex: 1, paddingRight: 9 } }, txt(text)), E(RN.Switch, { value: !!config[key], onValueChange: function (v) { config[key] = !!v; save(); update(); } })); }
+    function divider() { return E(RN.View, { style: { height: 1, backgroundColor: "#3a3d4a", marginVertical: 15 } }); }
+    var rules = config.rules.map(function (rule) {
+      return E(RN.View, { key: rule.key, style: { borderRadius: 12, backgroundColor: "#242731", padding: 12, marginTop: 9 } },
+        txt((rule.type === "server" ? "SERVIDOR · " : "USUARIO · ") + rule.label, { fontSize: 16, fontWeight: "700" }),
+        txt("ID: " + rule.target + " · " + rule.tone + " · " + (rule.enabled ? "ON" : "OFF"), { color: "#aeb5ce", fontSize: 12 }),
+        rule.url ? txt(rule.url, { color: "#acb7ff", fontSize: 12 }) : null,
+        E(RN.View, { style: { flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 8 } },
+          btn("Probar", function () { alertLocal(rule, "Prueba", "", true); }),
+          btn(rule.enabled ? "Desactivar" : "Activar", function () { rule.enabled = !rule.enabled; save(); update(); }, "#444b6b"),
+          btn("Editar", function () { setType(rule.type); setTarget(rule.target); setName(rule.label); setUrl(rule.url); setTone(rule.tone); }, "#444b6b"),
+          rule.url ? btn("Abrir enlace", function () { openSource(rule.url); }, "#444b6b") : null,
+          btn("Borrar", function () { config.rules = config.rules.filter(function (r) { return r.key !== rule.key; }); save(); update(); }, "#893849")
+        )
+      );
+    });
+    return E(RN.ScrollView, { style: { flex: 1, backgroundColor: "#17181f" }, contentContainerStyle: { padding: 16, paddingBottom: 60 } },
+      txt("CUSTOM NOTIFICATIONS", { fontSize: 23, fontWeight: "800" }),
+      txt("Revenge clasico · v1.0 · avisos dentro de Discord", { color: "#afb5c6", marginTop: 4 }),
+      divider(),
+      toggle("Activar alertas personalizadas", "enabled"),
+      toggle("Vibracion corta", "vibrate"),
+      toggle("Mostrar aviso dentro de Discord", "notifications"),
+      toggle("Avisar solo en menciones directas", "mentionOnly"),
+      txt("Los avisos funcionan mientras Discord ejecuta el plugin. No modifican los sonidos push de Android cuando la app esta cerrada.", { color: "#b8b9c6", marginTop: 9, fontSize: 12 }),
+      divider(),
+      txt("CREAR / EDITAR REGLA", { fontSize: 17, fontWeight: "700" }),
+      E(RN.View, { style: { flexDirection: "row", gap: 9 } }, btn("Servidor" + (type === "server" ? " ✓" : ""), function () { setType("server"); }, "#3f4666"),
+        btn("Usuario" + (type === "user" ? " ✓" : ""), function () { setType("user"); }, "#3f4666")),
+      input(target, setTarget, "ID numerico del " + (type === "server" ? "servidor" : "usuario"), { keyboardType: "number-pad" }),
+      input(name, setName, "Nombre para identificar la regla"),
+      input(url, setUrl, "Enlace de MP3/OGG directo (o referencia)"),
+      txt("YouTube, Spotify y TikTok se guardan como referencia, pero sus URLs normales NO son archivos de sonido. Un MP3/OGG directo puede funcionar si tu Discord expone reproductor de audio remoto.", { fontSize: 12, color: "#b9bfd4", marginTop: 7 }),
+      txt("TONO LOCAL: " + tone, { fontWeight: "700", marginTop: 14 }),
+      E(RN.View, { style: { flexDirection: "row", flexWrap: "wrap", gap: 6 } },
+        ["message1", "message2", "message3", "none"].map(function (t) { return btn(t + (tone === t ? " ✓" : ""), function () { setTone(t); }, "#3b466e"); })),
+      btn("GUARDAR REGLA", function () { if (addRule(type, target, name, url.trim(), tone)) { setTarget(""); setName(""); setUrl(""); } }),
+      divider(),
+      txt("MIS REGLAS (" + config.rules.length + ")", { fontSize: 17, fontWeight: "700" }),
+      rules.length ? rules : txt("Todavia no hay reglas. Primero añade un servidor o usuario.", { color: "#9d9fac", marginTop: 12 }),
+      divider(),
+      txt("COMANDOS LOCALES BUILT-IN", { fontSize: 17, fontWeight: "700" }),
+      txt("/notion  ·  /notioff  ·  /notitest  ·  /notistatus", { color: "#aeb7ff" }),
+      txt(commandStatus, { color: "#b7c2d7", marginTop: 7 }),
+      txt("Diagnostico: " + diagnostics, { color: "#b7c2d7", marginTop: 12, fontSize: 12 }),
+      txt("Audio: " + audioStatus, { color: "#b7c2d7", marginTop: 4, fontSize: 12 }),
+      btn("PROBAR PRIMERA REGLA", function () { var rule = config.rules[0]; if (rule) alertLocal(rule, "Prueba", "", true); else toast("Primero configura una regla"); }, "#444b6b")
+    );
   }
   return {
     onLoad: function () {
-      running = true;
-      favorites = loadSaved(storage.favorites);
-      installCommands();
-      try { patchPicker(); }
-      catch (e) { pickerStatus = "Error de integracion en selector"; log(pickerStatus, e); }
-      log("Plugin iniciado, " + commandsStatus);
+      if (active) return;
+      active = true; load();
+      try {
+        dispatcher = api.metro.common.FluxDispatcher || find("subscribe", "unsubscribe", "dispatch");
+        if (dispatcher && typeof dispatcher.subscribe === "function") {
+          onMessage = function (ev) { onMessageCreate(ev); };
+          dispatcher.subscribe("MESSAGE_CREATE", onMessage);
+          diagnostics = "Escuchando MESSAGE_CREATE";
+        } else diagnostics = "No se encontro FluxDispatcher: las reglas no pueden detectar mensajes";
+      } catch (e) { log("Suscribir", e); diagnostics = "Error al escuchar mensajes"; }
+      registerCommands(); update();
     },
     onUnload: function () {
-      running = false;
-      while (commands.length) { try { commands.pop()(); } catch (_) {} }
-      while (cleanups.length) { try { cleanups.pop()(); } catch (_) {} }
-      wrappedTypes = [];
-      originalCreateElement = null;
-      refreshSettings = null;
+      active = false;
+      try { if (dispatcher && onMessage) dispatcher.unsubscribe("MESSAGE_CREATE", onMessage); } catch (_) {}
+      onMessage = null; dispatcher = null;
+      commandUndo.forEach(function (undo) { try { undo(); } catch (_) {} }); commandUndo = [];
+      refresh = null; lastSeen = Object.create(null); lastRuleAt = Object.create(null);
+      diagnostics = "Plugin detenido";
     },
     settings: SettingsScreen
   };
