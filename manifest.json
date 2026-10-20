@@ -1,15 +1,14 @@
 {
-  "name": "Nitro Gift Watcher",
-  "description": "Detecta regalos de Nitro en mensajes, notifica resultados y guarda un historial; autocanje opcional.",
+  "name": "Profile Presets",
+  "description": "Guarda, edita y aplica perfiles de Discord con avatar, banner, biografia, pronombres y colores.",
   "authors": [
     {
-      "name": "Local"
+      "name": "Profile Tools"
     }
   ],
   "main": "index.js",
-  "hash": "c3f64d4d20723ac31ad2255261c7dda3b1b488f80a4c0fa632fcdc5f9735cc41",
-  "version": "1.2.0",
+  "hash": "2b214154709712bf3fbec3372d664f84d51a293675c33d8be0d71d63a902e3d2",
   "vendetta": {
-    "icon": "ic_gift_24px"
+    "icon": "ic_badge_staff"
   }
 }
