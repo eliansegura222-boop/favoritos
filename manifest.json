@@ -1,13 +1,13 @@
 {
   "name": "Profile Presets",
-  "description": "Guarda, edita y aplica perfiles de Discord con avatar, banner, biografia, pronombres y colores.",
+  "description": "Guarda, edita y aplica avatares, banners y colores del perfil Nitro; sin nombre visible, pronombres, biografia ni color de acento.",
   "authors": [
     {
       "name": "Profile Tools"
     }
   ],
   "main": "index.js",
-  "hash": "2b214154709712bf3fbec3372d664f84d51a293675c33d8be0d71d63a902e3d2",
+  "hash": "66e67f718a6c5880e5f35076c299c6593cac4f93e321b48fe284e1a8401da5a0",
   "vendetta": {
     "icon": "ic_badge_staff"
   }

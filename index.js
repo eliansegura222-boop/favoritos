@@ -8,7 +8,7 @@
   const LIMIT = 35;
   const HEX = /^#?[0-9a-fA-F]{6}$/;
   const IMAGE_URL = /^https:\/\//i;
-  const EMPTY = () => ({ label: "", globalName: "", bio: "", pronouns: "", avatarUrl: "", bannerUrl: "", accent: "", primary: "", secondary: "", avatarData: "", bannerData: "" });
+  const EMPTY = () => ({ label: "", avatarUrl: "", bannerUrl: "", primary: "", secondary: "", avatarData: "", bannerData: "" });
 
   function uid() {
     try {
@@ -43,10 +43,7 @@
   function validate(p) {
     if (!p.label.trim()) throw new Error("Escribe un nombre para este perfil.");
     if (p.label.trim().length > 45) throw new Error("El nombre del perfil no puede superar 45 caracteres.");
-    if (p.bio.length > 190) throw new Error("La biografía permite hasta 190 caracteres.");
-    if (p.pronouns.length > 40) throw new Error("Pronombres: máximo 40 caracteres.");
-    if (p.globalName.length > 32) throw new Error("Nombre visible: máximo 32 caracteres.");
-    ["accent", "primary", "secondary"].forEach(k => colorNum(p[k], k));
+    ["primary", "secondary"].forEach(k => colorNum(p[k], k));
     if (Boolean(p.primary) !== Boolean(p.secondary)) throw new Error("Para el tema, escribe ambos colores o deja ambos vacíos.");
     ["avatarUrl", "bannerUrl"].forEach(k => {
       if (p[k] && !IMAGE_URL.test(p[k]) && !/^data:image\/(png|jpeg|gif|webp);base64,/i.test(p[k])) {
@@ -78,46 +75,84 @@
       return content;
     });
   }
-  function imageMime(uri) {
-    const raw = String(uri || "").split("?")[0].toLowerCase();
-    if (raw.endsWith(".gif")) return "image/gif";
-    if (raw.endsWith(".jpg") || raw.endsWith(".jpeg")) return "image/jpeg";
-    if (raw.endsWith(".webp")) return "image/webp";
-    return "image/png";
+  function detectedMime(bytes) {
+    if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71) return "image/png";
+    if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
+    if (bytes.length >= 6 && bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56) return "image/gif";
+    if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) return "image/webp";
+    return "";
   }
-  function fetchImageData(uri, bytesLimit) {
-    if (!uri) return Promise.resolve(null);
-    if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(uri)) {
-      if (uri.length > bytesLimit * 1.38 + 100) return Promise.reject(new Error("Imagen demasiado grande."));
-      return Promise.resolve(uri);
+  function toBase64(bytes) {
+    // No FileReader required. React Native supports Response.arrayBuffer on many versions.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const parts = [];
+    let part = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+      part += alphabet[a >> 2] + alphabet[((a & 3) << 4) | (b === undefined ? 0 : b >> 4)] +
+        (b === undefined ? "=" : alphabet[((b & 15) << 2) | (c === undefined ? 0 : c >> 6)]) +
+        (c === undefined ? "=" : alphabet[c & 63]);
+      if (part.length >= 8192) { parts.push(part); part = ""; }
     }
-    if (!IMAGE_URL.test(uri)) return Promise.reject(new Error("La imagen debe ser una URL HTTPS."));
-    if (typeof fetch !== "function" || typeof FileReader !== "function") return Promise.reject(new Error("Revenge no permite descargar esta imagen como datos."));
-    return fetch(uri).then(response => {
-      if (!response.ok) throw new Error("No se pudo descargar la imagen (HTTP " + response.status + ").");
-      return response.blob();
-    }).then(blob => {
-      if (!blob || blob.size > bytesLimit) throw new Error("Imagen demasiado grande para el perfil.");
-      if (!/^image\/(png|jpeg|gif|webp)$/i.test(blob.type || imageMime(uri))) throw new Error("Archivo no compatible; usa PNG, JPG, GIF o WebP.");
-      return new Promise((resolve, reject) => {
+    if (part) parts.push(part);
+    return parts.join("");
+  }
+  async function fetchImageData(uri, bytesLimit) {
+    if (!uri) return null;
+    if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(uri)) {
+      if (uri.length > Math.ceil(bytesLimit * 4 / 3) + 100) throw new Error("La imagen supera el tamaño permitido.");
+      return uri;
+    }
+    if (!IMAGE_URL.test(uri)) throw new Error("La imagen debe tener un enlace HTTPS directo.");
+    if (typeof fetch !== "function") throw new Error("Este Revenge no permite descargar imágenes desde enlaces.");
+    let response;
+    try { response = await fetch(uri); }
+    catch (e) { throw new Error("No se pudo abrir el enlace de imagen: " + errText(e)); }
+    if (!response || !response.ok) throw new Error("Descarga fallida (HTTP " + (response ? response.status : "sin respuesta") + ").");
+    const sizeHeader = response.headers && typeof response.headers.get === "function" ? Number(response.headers.get("content-length")) : 0;
+    if (sizeHeader > bytesLimit) throw new Error("Imagen demasiado grande; máximo " + (bytesLimit / 1048576).toFixed(1) + " MB.");
+    // Do not rely solely on FileReader; some Discord Android builds lack it.
+    let buffer = null;
+    let readError = null;
+    if (typeof response.arrayBuffer === "function") {
+      try { buffer = await response.arrayBuffer(); } catch (e) { readError = e; }
+    }
+    if (buffer) {
+      const bytes = new Uint8Array(buffer);
+      if (!bytes.length || bytes.length > bytesLimit) throw new Error("La imagen está vacía o es demasiado grande.");
+      const mime = detectedMime(bytes);
+      if (!mime) throw new Error("El enlace no devuelve un PNG, JPG, GIF o WebP válido.");
+      return "data:" + mime + ";base64," + toBase64(bytes);
+    }
+    if (typeof response.blob === "function" && typeof FileReader === "function") {
+      let blob;
+      try { blob = await response.blob(); } catch (e) { throw new Error("No se pudo leer la imagen: " + errText(e)); }
+      if (!blob || !blob.size || blob.size > bytesLimit) throw new Error("Imagen vacía o demasiado grande.");
+      const data = await new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onerror = () => reject(new Error("No se pudo procesar la imagen."));
-        reader.onload = () => {
-          const s = String(reader.result || "");
-          if (!/^data:image\//i.test(s)) reject(new Error("Formato de imagen no reconocido."));
-          else resolve(s);
-        };
+        reader.onerror = () => reject(new Error("Error al convertir la imagen a base64."));
+        reader.onload = () => resolve(String(reader.result || ""));
         reader.readAsDataURL(blob);
       });
-    });
+      if (!/^data:image\/(png|jpeg|gif|webp);base64,/i.test(data)) throw new Error("El enlace no devolvió una imagen compatible.");
+      return data;
+    }
+    throw new Error("Esta versión de Revenge no puede convertir imágenes a base64: " + errText(readError || "sin conversor disponible"));
   }
-  function memoizeImages(record) {
-    // Keep local copies when possible, so old Discord CDN image hashes can expire safely.
+  async function memoizeImages(record) {
+    // Save local copies for reasonably small files; the original link is always preserved.
     const results = [];
-    return Promise.all([
-      record.avatarUrl && !record.avatarData ? fetchImageData(record.avatarUrl, 2 * 1024 * 1024).then(v => { record.avatarData = v; }).catch(e => { record.avatarData = ""; results.push("Avatar: " + errText(e)); }) : Promise.resolve(),
-      record.bannerUrl && !record.bannerData ? fetchImageData(record.bannerUrl, 4 * 1024 * 1024).then(v => { record.bannerData = v; }).catch(e => { record.bannerData = ""; results.push("Banner: " + errText(e)); }) : Promise.resolve()
-    ]).then(() => results);
+    const jobs = [
+      ["avatarUrl", "avatarData", 2 * 1024 * 1024, "Avatar"],
+      ["bannerUrl", "bannerData", 4 * 1024 * 1024, "Banner"]
+    ];
+    for (const [urlKey, dataKey, max, name] of jobs) {
+      if (record[urlKey] && !record[dataKey]) {
+        try { record[dataKey] = await fetchImageData(record[urlKey], max); }
+        catch (e) { record[dataKey] = ""; results.push(name + ": " + errText(e)); }
+      }
+    }
+    return results;
   }
   function chooseImage(p, field) {
     const k = field === "avatar" ? "avatarUrl" : "bannerUrl";
@@ -125,23 +160,25 @@
     return p[dk] || p[k] || "";
   }
   function applyPreset(p, notify) {
-    // Only called by an explicit button press. Errors are never hidden as success.
+    // Only change fields explicitly requested by the user. Never modify name, bio or pronouns.
     try { validate(p); } catch (e) { return Promise.reject(e); }
     if (!uid()) return Promise.reject(new Error("No hay una cuenta de Discord activa."));
     const attempts = [];
     const failures = [];
-    const basic = { bio: p.bio, pronouns: p.pronouns };
-    const accent = colorNum(p.accent, "Acento");
     const primary = colorNum(p.primary, "Primario");
     const secondary = colorNum(p.secondary, "Secundario");
-    if (accent !== null) basic.accent_color = accent;
-    const account = {};
-    if (p.globalName) account.global_name = p.globalName;
-    if (p.avatarUrl) attempts.push({ name: "Avatar", run: () => fetchImageData(chooseImage(p, "avatar"), 8 * 1024 * 1024).then(image => callHttp("patch", "/users/@me", { avatar: image })) });
-    if (Object.keys(account).length) attempts.push({ name: "Nombre visible", run: () => callHttp("patch", "/users/@me", account) });
-    attempts.push({ name: "Biografía, pronombres y acento", run: () => callHttp("patch", "/users/@me/profile", basic) });
-    if (primary !== null && secondary !== null) attempts.push({ name: "Colores Nitro", run: () => callHttp("patch", "/users/@me/profile", { theme_colors: [primary, secondary] }) });
-    if (p.bannerUrl) attempts.push({ name: "Banner Nitro", run: () => fetchImageData(chooseImage(p, "banner"), 10 * 1024 * 1024).then(image => callHttp("patch", "/users/@me/profile", { banner: image })) });
+    if (p.avatarUrl || p.avatarData) attempts.push({
+      name: "Avatar", run: () => fetchImageData(chooseImage(p, "avatar"), 8 * 1024 * 1024)
+        .then(image => callHttp("patch", "/users/@me", { avatar: image }))
+    });
+    if (p.bannerUrl || p.bannerData) attempts.push({
+      name: "Banner Nitro", run: () => fetchImageData(chooseImage(p, "banner"), 10 * 1024 * 1024)
+        .then(image => callHttp("patch", "/users/@me/profile", { banner: image }))
+    });
+    if (primary !== null && secondary !== null) attempts.push({
+      name: "Colores Nitro", run: () => callHttp("patch", "/users/@me/profile", { theme_colors: [primary, secondary] })
+    });
+    if (!attempts.length) return Promise.reject(new Error("Este perfil no tiene avatar, banner ni colores configurados."));
     let ok = 0;
     let chain = Promise.resolve();
     attempts.forEach(job => {
@@ -160,23 +197,18 @@
     const user = userStore && userStore.getCurrentUser && userStore.getCurrentUser();
     if (!user) return Promise.reject(new Error("No encontré el usuario actual."));
     return callHttp("get", "/users/" + id + "/profile").catch(() => ({})).then(body => {
-      const data = body && body.user_profile || {};
+      const data = body && (body.user_profile || body.userProfile) || {};
       const u = body && body.user || user;
-      const userBanner = data.banner || u.banner || user.banner;
-      const userAvatar = u.avatar || user.avatar;
-      const avext = String(userAvatar || "").startsWith("a_") ? "gif" : "png";
-      const bext = String(userBanner || "").startsWith("a_") ? "gif" : "png";
+      const bannerHash = data.banner || u.banner || user.banner;
+      const avatarHash = u.avatar || user.avatar;
+      const avatarExt = String(avatarHash || "").startsWith("a_") ? "gif" : "png";
+      const bannerExt = String(bannerHash || "").startsWith("a_") ? "gif" : "png";
       const theme = data.theme_colors || u.theme_colors || [];
       return {
         label: "Perfil " + (new Date()).toLocaleDateString(),
-        globalName: String(u.global_name || user.globalName || ""),
-        bio: String(data.bio || u.bio || ""),
-        pronouns: String(data.pronouns || u.pronouns || ""),
-        avatarUrl: userAvatar ? "https://cdn.discordapp.com/avatars/" + id + "/" + userAvatar + "." + avext + "?size=512" : "",
-        bannerUrl: userBanner ? "https://cdn.discordapp.com/banners/" + id + "/" + userBanner + "." + bext + "?size=1024" : "",
-        accent: toHex(data.accent_color != null ? data.accent_color : u.accent_color),
-        primary: toHex(theme[0]),
-        secondary: toHex(theme[1]),
+        avatarUrl: avatarHash ? "https://cdn.discordapp.com/avatars/" + id + "/" + avatarHash + "." + avatarExt + "?size=512" : "",
+        bannerUrl: bannerHash ? "https://cdn.discordapp.com/banners/" + id + "/" + bannerHash + "." + bannerExt + "?size=1024" : "",
+        primary: toHex(theme[0]), secondary: toHex(theme[1]),
         avatarData: "", bannerData: ""
       };
     });
@@ -203,7 +235,6 @@
       }
     }, [activeId, formOwner]);
     const bg = "#101116", card = "#1A1C25", ink = "#F4F6FA", muted = "#B3B7C7", purple = "#9A7CFF", line = "#343644";
-    const textStyle = { color: ink, fontSize: 14 };
     const refresh = () => setItems(profiles().slice());
     const update = (key, val) => setForm(old => Object.assign({}, old, { [key]: val, ...(key === "avatarUrl" ? { avatarData: "" } : key === "bannerUrl" ? { bannerData: "" } : {}) }));
     const section = label => e(Text, { style: { color: purple, fontSize: 15, fontWeight: "700", marginTop: 16, marginBottom: 8 } }, label);
@@ -213,7 +244,7 @@
         e(Text, { style: { color: ink, marginBottom: 6, fontWeight: "600" } }, label),
         e(TextInput, {
           style: { backgroundColor: "#252733", borderColor: line, borderWidth: 1, color: ink, borderRadius: 9, minHeight: more ? 70 : 43, paddingVertical: 10, paddingHorizontal: 12, textAlignVertical: more ? "top" : "center" },
-          placeholderTextColor: "#828699", placeholder: (key === "avatarUrl" || key === "bannerUrl") ? "https://.../imagen.png" : key === "accent" || key === "primary" || key === "secondary" ? "#AABBCC" : label,
+          placeholderTextColor: "#828699", placeholder: (key === "avatarUrl" || key === "bannerUrl") ? "https://.../imagen.png" : (key === "primary" || key === "secondary") ? "#AABBCC" : label,
           value: String(form[key] || ""), onChangeText: val => update(key, val), multiline: !!more,
           autoCapitalize: "none", autoCorrect: false,
         })
@@ -233,7 +264,11 @@
       if (busy) return;
       let next;
       try {
-        next = Object.assign({}, form, { label: form.label.trim() });
+        next = Object.assign({}, EMPTY(), {
+          label: String(form.label || "").trim(), avatarUrl: form.avatarUrl || "", bannerUrl: form.bannerUrl || "",
+          primary: form.primary || "", secondary: form.secondary || "",
+          avatarData: form.avatarData || "", bannerData: form.bannerData || ""
+        });
         validate(next);
         if (formOwner !== uid()) throw new Error("Cambiaste de cuenta: abre el editor de nuevo.");
         if (editing === null && profiles().length >= LIMIT) throw new Error("Límite de " + LIMIT + " perfiles guardados.");
@@ -292,7 +327,7 @@
     }
     return e(ScrollView, { keyboardShouldPersistTaps: "handled", style: { flex: 1, backgroundColor: bg }, contentContainerStyle: { paddingHorizontal: 16, paddingVertical: 19, paddingBottom: 70 } },
       e(Text, { style: { color: ink, fontWeight: "800", fontSize: 23 } }, "Profile Presets"),
-      hint("Guarda varios perfiles con nombre en tu teléfono. Aplica sus datos a tu cuenta solo al tocar Aplicar."),
+      hint("Guarda y aplica avatar, banner y los dos colores del tema Nitro. No modifica nombre, pronombres, biografía ni acento del banner."),
       button("Capturar perfil actual", doCapture),
       section("PERFILES GUARDADOS (" + visible.length + "/" + LIMIT + ")"),
       ...(!visible.length ? [hint("Todavía no hay perfiles guardados.")] : visible.map(p =>
@@ -301,9 +336,8 @@
             thumb(p.avatarUrl || p.avatarData, 50, true),
             e(View, { style: { flex: 1, paddingLeft: p.avatarUrl ? 10 : 0 } },
               e(Text, { style: { color: ink, fontSize: 16, fontWeight: "700" } }, p.label),
-              e(Text, { numberOfLines: 1, style: { color: muted, fontSize: 12 } }, p.globalName || "Sin nombre visible"),
               e(View, { style: { flexDirection: "row", marginTop: 5 } },
-                ...[p.accent, p.primary, p.secondary].filter(Boolean).map((hex, i) => e(View, { key: i, style: { backgroundColor: HEX.test(hex) ? (hex.startsWith("#") ? hex : "#" + hex) : line, width: 17, height: 17, borderRadius: 5, marginRight: 5 } }))
+                ...[p.primary, p.secondary].filter(Boolean).map((hex, i) => e(View, { key: i, style: { backgroundColor: HEX.test(hex) ? (hex.startsWith("#") ? hex : "#" + hex) : line, width: 17, height: 17, borderRadius: 5, marginRight: 5 } }))
               )
             )
           ),
@@ -319,16 +353,12 @@
       section(editing ? "EDITAR PERFIL" : "CREAR PERFIL"),
       e(View, { style: { backgroundColor: card, borderRadius: 12, borderWidth: 1, borderColor: line, padding: 13 } },
         field("Nombre del perfil guardado", "label"),
-        field("Nombre visible de Discord", "globalName"),
-        field("Biografía / Acerca de mí (máx. 190)", "bio", true),
-        field("Pronombres (máx. 40)", "pronouns"),
         field("URL HTTPS del avatar", "avatarUrl"),
         field("URL HTTPS del banner (Nitro)", "bannerUrl"),
-        hint("Usa enlaces directos PNG, JPG, GIF o WebP. Al guardar, se intenta conservar una copia local. Los GIF animados y banners pueden requerir Nitro."),
-        field("Color del banner / acento", "accent"),
+        hint("Usa URLs directas PNG, JPG, GIF o WebP (por ejemplo i.pinimg.com). Se intenta guardar una copia de las imágenes; los banners y GIF animados pueden requerir Nitro."),
         field("Color principal del perfil (Nitro)", "primary"),
         field("Color secundario del perfil (Nitro)", "secondary"),
-        hint("Colores hexadecimales, por ejemplo #9A7CFF. Los colores dobles del perfil requieren Nitro."),
+        hint("Colores hexadecimales (#9A7CFF). El tema de dos colores requiere Nitro. Si un cambio de imagen falla, aparecerá el error exacto."),
         e(View, { style: { flexDirection: "row", flexWrap: "wrap" } },
           button(editing ? "Guardar cambios" : "Guardar perfil", doSave),
           button("Limpiar editor", () => { setForm(EMPTY()); setEditing(null); setNotice(""); }, "soft")
@@ -336,7 +366,7 @@
       ),
       busy ? e(ActivityIndicator, { color: purple, size: "small", style: { marginTop: 14 } }) : null,
       notice ? e(Text, { selectable: true, style: { color: ink, marginTop: 14, fontSize: 13, lineHeight: 19 } }, notice) : null,
-      hint("Se guarda por cuenta en el almacenamiento local de Revenge. No se envían datos a servidores del plugin. Los cambios reales pueden requerir verificación de Discord; si alguno falla, se indicará por separado.")
+      hint("Los perfiles se guardan por cuenta en Revenge. Discord recibe las imágenes al pulsar Aplicar; puede pedir una verificación. No necesitas cambiar nombre, pronombres ni biografía.")
     );
   }
   return {
